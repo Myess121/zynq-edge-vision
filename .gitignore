@@ -1,0 +1,35 @@
+# Vivado / Vitis generated
+*.cache/
+*.gen/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.srcs/
+.Xil/
+*.jou
+*.log
+*.str
+*.dcp
+*.xpr
+NA/
+vivado_pid*
+webtalk*
+
+# HLS solution intermediates
+**/solution*/.autopilot/
+**/solution*/syn/
+**/solution*/sim/
+**/solution*/csim/
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Models are downloaded by model/download.md, not committed
+model/*.weights
+
+# Board outputs
+*.jpg
+!docs/**/*.jpg
