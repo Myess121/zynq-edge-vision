@@ -196,7 +196,7 @@ def run_camera(args, model, pre_factory):
     signal.signal(signal.SIGTERM, _on_term)
     signal.signal(signal.SIGINT, _on_term)
     from pynq import Overlay
-    from pynq.lib.video import VideoMode, PIXEL_RGB
+    from pynq.lib.video import VideoMode, PIXEL_BGR
     # spawn (not fork): the worker must not inherit the overlay, DMA buffers or OpenCV thread state
     ctx = mp.get_context("spawn")
     req_q, res_q = ctx.Queue(maxsize=1), ctx.Queue(maxsize=1)
@@ -207,7 +207,7 @@ def run_camera(args, model, pre_factory):
 
     def open_video():
         c, h = ol.video.camera_in, ol.video.hdmi_out
-        h.configure(VideoMode(OUT_W, OUT_H, 24), PIXEL_RGB)
+        h.configure(VideoMode(OUT_W, OUT_H, 24), PIXEL_BGR)  # frames are BGR; the PL color_convert reorders
         h.start()
         time.sleep(0.5)                  # PL SCCB state machine configures the sensor after reset
         c.configure(VideoMode(CAM_W, CAM_H, 24))
@@ -237,8 +237,8 @@ def run_camera(args, model, pre_factory):
             except (CaptureTimeout, RuntimeError) as e:   # stuck, or the channel halted on an error
                 stalls += 1
                 log.warning("capture stalled (%s), reloading the overlay (#%d)", e.__class__.__name__, stalls)
-                if stalls > 3:
-                    raise RuntimeError("capture does not recover")
+                if stalls > 3:                   # camera still disturbed (e.g. ribbon held): keep retrying slowly
+                    time.sleep(2)
                 cam.close()                      # stop both VDMA channels before freeing buffers
                 hdmi.close()
                 ol.download()
