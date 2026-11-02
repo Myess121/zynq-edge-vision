@@ -33,3 +33,4 @@ model/*.weights
 # Board outputs
 *.jpg
 !docs/**/*.jpg
+!docs/figures/*.jpg
