@@ -79,6 +79,14 @@ docs/         技术文档、提交清单
 overlay/      生成的 bit/hwh
 ```
 
-## 致谢
+## 致谢与第三方来源
 
-视频采集、HDMI 输出、OV5640 配置部分基于正点原子领航者 ZYNQ 例程；resize_accel 来自 PYNQ resizer 示例；模型来自 YOLO-Fastest（dog-qiuqiu/Yolo-Fastest）。
+| 内容 | 来源 | 说明 |
+|---|---|---|
+| OV5640 SCCB 配置模块 `hw/rtl/i2c_dri.v`、`i2c_ov5640_rgb565_cfg.v` | 正点原子领航者 ZYNQ 例程（42_ov5640_udp_pc），http://www.openedv.com | 保留原作者文件头，`ov5640_hw_cfg.v` 为本项目封装 |
+| PYNQ base 工程（视频采集、VDMA、HDMI 输出等 IP） | 正点原子领航者 ZYNQ PYNQ 例程（基于 Xilinx PYNQ） | 由 Vivado 2020.2 迁移到 2026.1，并做了裁剪和修改 |
+| `hw/hls/resize_1.0`（resize_accel） | PYNQ resizer 示例，https://github.com/Xilinx/PYNQ | 按 PYNQ 的 BSD-3-Clause 许可使用 |
+| YOLO-Fastest v1.1 模型与 cfg | https://github.com/dog-qiuqiu/Yolo-Fastest | 权重不入库，请按原仓库的许可获取和使用 |
+| COCO 类别名 | https://cocodataset.org | — |
+
+本仓库只包含本项目编写或移植的源码，不包含正点原子资料盘中的原始文档和压缩包。

@@ -6,6 +6,7 @@ and prints frame statistics so the result can be checked without looking at the 
 usage: sudo python3 cam_passthrough.py [overlay.bit]
 """
 import os
+import signal
 import sys
 import time
 
@@ -28,9 +29,29 @@ cam.start()
 x0, y0 = (OUT_W - CAM_W) // 2, (OUT_H - CAM_H) // 2
 print("running, overlay %s" % bit, flush=True)
 
-n, t0 = 0, time.time()
+class Timeout(Exception):
+    pass
+
+
+def on_alarm(*_):
+    raise Timeout()
+
+
+signal.signal(signal.SIGALRM, on_alarm)
+n, t0, restarts = 0, time.time(), 0
 while True:
-    frame = cam.readframe()
+    # A bad camera line (VDMA S2MM EOL/SOF error) stalls the write channel: restart it
+    signal.alarm(1)
+    try:
+        frame = cam.readframe()
+    except Timeout:
+        restarts += 1
+        print("no frame for 1 s, restarting capture (#%d)" % restarts, flush=True)
+        cam.stop()
+        cam.start()
+        continue
+    finally:
+        signal.alarm(0)
     out = hdmi.newframe()
     out[:] = 40
     out[y0:y0 + CAM_H, x0:x0 + CAM_W, :] = frame
