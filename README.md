@@ -57,6 +57,14 @@ sudo python3 sw/edge_detect.py --camera --pl --frames 0      # 实时摄像头 �
 
 各阶段耗时写入 `edge_detect.log`，`--pl` / `--cpu` 用于加速对比。
 
+开机自动运行演示（不依赖电脑）：
+
+```bash
+sudo cp sw/edge-demo.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable edge-demo
+```
+
+关闭自启：`sudo systemctl disable --now edge-demo`。
+
 ## 性能
 
 | 指标 | 结果 |

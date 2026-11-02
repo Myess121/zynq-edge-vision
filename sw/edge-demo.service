@@ -11,12 +11,15 @@ Type=simple
 WorkingDirectory=/home/xilinx/edge
 Environment=XILINX_XRT=/usr
 Environment=BOARD=None
+Environment=VIRTUAL_ENV=/usr/local/share/pynq-venv
+Environment=PATH=/usr/local/share/pynq-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+User=root
 ExecStart=/usr/local/share/pynq-venv/bin/python3 -u /home/xilinx/edge/sw/edge_detect.py --camera --cpu --frames 0 --size 256 --model-dir /home/xilinx/edge/model --overlay /home/xilinx/edge/overlay/edge_v1.bit --log /home/xilinx/edge/edge_demo.log
 # SIGTERM lets the app close the VDMA before its buffers are freed; never SIGKILL it first
 KillSignal=SIGTERM
 KillMode=mixed
 TimeoutStopSec=15
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
