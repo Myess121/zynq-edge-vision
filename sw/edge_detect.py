@@ -11,10 +11,11 @@ Usage examples (run as root on the board):
 """
 import argparse
 import logging
+import multiprocessing as mp
 import os
+import queue
 import signal
 import sys
-import threading
 import time
 
 import cv2
@@ -133,7 +134,10 @@ class PlResize:
 
 # ----------------------------------------------------------------------------- drawing
 def draw(img, dets, names, stats):
+    ih, iw = img.shape[:2]
     for c, s, x, y, w, h in dets:
+        x, y = max(0, min(int(x), iw - 1)), max(0, min(int(y), ih - 1))
+        w, h = max(1, min(int(w), iw - 1 - x)), max(1, min(int(h), ih - 1 - y))
         cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
         cv2.putText(img, "%s %.2f" % (names[c] if c < len(names) else c, s), (x, max(12, y - 4)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
@@ -193,60 +197,70 @@ def run_camera(args, model, pre_factory):
     signal.signal(signal.SIGINT, _on_term)
     from pynq import Overlay
     from pynq.lib.video import VideoMode, PIXEL_RGB
+    # spawn (not fork): the worker must not inherit the overlay, DMA buffers or OpenCV thread state
+    ctx = mp.get_context("spawn")
+    req_q, res_q = ctx.Queue(maxsize=1), ctx.Queue(maxsize=1)
+    worker = ctx.Process(target=detector_process, args=(args.model_dir, args.size, args.threads, req_q, res_q),
+                         daemon=True)
+    worker.start()
     ol = Overlay(args.overlay)
-    cam, hdmi = ol.video.camera_in, ol.video.hdmi_out
-    hdmi.configure(VideoMode(OUT_W, OUT_H, 24), PIXEL_RGB)
-    hdmi.start()
-    cam.configure(VideoMode(CAM_W, CAM_H, 24))
-    cam.start()
+
+    def open_video():
+        c, h = ol.video.camera_in, ol.video.hdmi_out
+        h.configure(VideoMode(OUT_W, OUT_H, 24), PIXEL_RGB)
+        h.start()
+        time.sleep(0.5)                  # PL SCCB state machine configures the sensor after reset
+        c.configure(VideoMode(CAM_W, CAM_H, 24))
+        c.start()
+        return c, h
+
+    cam, hdmi = open_video()
     pre = pre_factory(ol)
     x0, y0 = (OUT_W - CAM_W) // 2, (OUT_H - CAM_H) // 2
+    small_buf = np.zeros((args.size, args.size, 3), np.uint8)
 
-    # Display and detection are decoupled: the main loop keeps camera -> HDMI at full rate and
-    # overlays the latest boxes; a worker thread runs preprocess + inference on the newest frame.
-    shared = {"frame": None, "dets": [], "pre_ms": 0.0, "inf_ms": 0.0, "det_fps": 0.0, "stop": False}
-    lock = threading.Lock()
-
-    def detector():
-        last = time.perf_counter()
-        while not shared["stop"]:
-            with lock:
-                rgb, shared["frame"] = shared["frame"], None
-            if rgb is None:
-                time.sleep(0.002)
-                continue
-            t0 = time.perf_counter()
-            small = pre(rgb, args.size)
-            t1 = time.perf_counter()
-            dets = model.infer(small, CAM_W, CAM_H)
-            t2 = time.perf_counter()
-            with lock:
-                shared.update(dets=dets, pre_ms=(t1 - t0) * 1e3, inf_ms=(t2 - t1) * 1e3,
-                              det_fps=1.0 / max(t2 - last, 1e-6))
-            last = t2
-
-    worker = threading.Thread(target=detector, daemon=True)
-    worker.start()
-    n, t_start, disp_fps = 0, time.perf_counter(), 0.0
+    # Display and detection are decoupled: this process keeps camera -> HDMI at full rate and
+    # overlays the latest boxes; a separate process (no shared GIL, no pynq) runs inference on the
+    # newest preprocessed frame. Only the small network input and the box list cross processes.
+    dets, inf_ms, det_fps, pre_ms, busy = [], 0.0, 0.0, 0.0, False
+    n, t_start, disp_fps, stalls = 0, time.perf_counter(), 0.0, 0
     try:
         while args.frames <= 0 or n < args.frames:
             t0 = time.perf_counter()
-            # a bad camera line (VDMA S2MM EOL/SOF error) stalls the write channel: restart it
-            signal.alarm(1)
+            # a glitch on the camera bus (e.g. the ribbon being moved) can wedge the capture pipeline
+            # (VDMA S2MM and the HLS pixel IPs); a VDMA reset alone does not recover it, so reload the
+            # bitstream, which also re-runs the PL sensor configuration
+            signal.alarm(3)
             try:
                 frame = cam.readframe()      # BGR order from the capture pipeline
-            except CaptureTimeout:
-                log.warning("no frame for 1 s, restarting capture")
-                cam.stop()
-                cam.start()
+                stalls = 0
+            except (CaptureTimeout, RuntimeError) as e:   # stuck, or the channel halted on an error
+                stalls += 1
+                log.warning("capture stalled (%s), reloading the overlay (#%d)", e.__class__.__name__, stalls)
+                if stalls > 3:
+                    raise RuntimeError("capture does not recover")
+                cam.close()                      # stop both VDMA channels before freeing buffers
+                hdmi.close()
+                ol.download()
+                cam, hdmi = open_video()
                 continue
             finally:
                 signal.alarm(0)
             bgr = np.array(frame)
             frame.freebuffer()
-            with lock:
-                shared["frame"] = np.ascontiguousarray(bgr[:, :, ::-1])
-                dets, pre_ms, inf_ms, det_fps = shared["dets"], shared["pre_ms"], shared["inf_ms"], shared["det_fps"]
+            if not busy:                         # hand the newest frame to the detector
+                tp = time.perf_counter()
+                small_buf[:] = pre(np.ascontiguousarray(bgr[:, :, ::-1]), args.size)
+                pre_ms = (time.perf_counter() - tp) * 1e3
+                req_q.put(small_buf)
+                busy = True
+            try:
+                dets, inf_ms, det_fps = res_q.get_nowait()
+                busy = False
+            except queue.Empty:
+                pass
+            if args.fake_dets and n >= 60:      # debug: draw boxes every frame, incl. off-screen ones
+                dets = [(62, 0.9, 200, 120, 240, 200), (0, 0.8, -50, -30, 120, 600), (39, 0.7, 600, 450, 300, 100)]
             view = draw(bgr, dets, model.names,
                         [("mode", pre.name), ("display fps", "%.1f" % disp_fps),
                          ("detect fps", "%.2f" % det_fps), ("pre", "%.1f ms" % pre_ms),
@@ -264,11 +278,26 @@ def run_camera(args, model, pre_factory):
                          n, disp_fps, det_fps, pre_ms, inf_ms, len(dets))
             n += 1
     finally:
-        shared["stop"] = True
-        worker.join(timeout=2)
-        log.info("frames=%d avg_display_fps=%.2f", n, n / (time.perf_counter() - t_start))
-        cam.close()
+        signal.alarm(0)
+        cam.close()                              # stop the VDMA before anything else
         hdmi.close()
+        worker.terminate()
+        log.info("frames=%d avg_display_fps=%.2f", n, n / (time.perf_counter() - t_start))
+
+
+def detector_process(model_dir, size, threads, req_q, res_q):
+    """Inference worker: receives size x size RGB arrays, returns (dets, infer_ms, det_fps)."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    cv2.setNumThreads(threads)
+    model = YoloFastest(model_dir, size)
+    last = time.perf_counter()
+    while True:
+        small = req_q.get()
+        t0 = time.perf_counter()
+        dets = model.infer(small, CAM_W, CAM_H)
+        t1 = time.perf_counter()
+        res_q.put((dets, (t1 - t0) * 1e3, 1.0 / max(t1 - last, 1e-6)))
+        last = t1
 
 
 def main():
@@ -286,6 +315,7 @@ def main():
     ap.add_argument("--frames", type=int, default=10, help="frames to run (camera: 0 = forever)")
     ap.add_argument("--out", default="det_out.jpg")
     ap.add_argument("--log", default="edge_detect.log")
+    ap.add_argument("--fake-dets", action="store_true", help="debug: overlay fixed boxes every frame")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
