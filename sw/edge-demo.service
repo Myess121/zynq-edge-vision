@@ -1,0 +1,23 @@
+# Boot-time demo: OV5640 -> PL -> YOLO-Fastest -> HDMI, no PC needed.
+# install: sudo cp edge-demo.service /etc/systemd/system/ && sudo systemctl daemon-reload
+# enable:  sudo systemctl enable edge-demo      disable: sudo systemctl disable --now edge-demo
+[Unit]
+Description=Zynq edge object detection demo (camera -> HDMI)
+After=pl_server.service network.target
+Wants=pl_server.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/xilinx/edge
+Environment=XILINX_XRT=/usr
+Environment=BOARD=None
+ExecStart=/usr/local/share/pynq-venv/bin/python3 -u /home/xilinx/edge/sw/edge_detect.py --camera --cpu --frames 0 --size 256 --model-dir /home/xilinx/edge/model --overlay /home/xilinx/edge/overlay/edge_v1.bit --log /home/xilinx/edge/edge_demo.log
+# SIGTERM lets the app close the VDMA before its buffers are freed; never SIGKILL it first
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

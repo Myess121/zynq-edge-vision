@@ -12,6 +12,7 @@ Usage examples (run as root on the board):
 import argparse
 import logging
 import os
+import signal
 import sys
 import threading
 import time
@@ -172,7 +173,24 @@ def run_image(args, model, pre):
         log.info("  %s %.2f", model.names[c], s)
 
 
+class CaptureTimeout(Exception):
+    pass
+
+
+def _on_alarm(*_):
+    raise CaptureTimeout()
+
+
+def _on_term(*_):
+    raise SystemExit(0)
+
+
 def run_camera(args, model, pre_factory):
+    signal.signal(signal.SIGALRM, _on_alarm)
+    # the VDMA must be stopped before its buffers are freed (see the finally below), otherwise it
+    # keeps writing into memory the kernel reuses: turn SIGTERM/SIGINT into a normal exit
+    signal.signal(signal.SIGTERM, _on_term)
+    signal.signal(signal.SIGINT, _on_term)
     from pynq import Overlay
     from pynq.lib.video import VideoMode, PIXEL_RGB
     ol = Overlay(args.overlay)
@@ -213,7 +231,17 @@ def run_camera(args, model, pre_factory):
     try:
         while args.frames <= 0 or n < args.frames:
             t0 = time.perf_counter()
-            frame = cam.readframe()          # BGR order from the capture pipeline
+            # a bad camera line (VDMA S2MM EOL/SOF error) stalls the write channel: restart it
+            signal.alarm(1)
+            try:
+                frame = cam.readframe()      # BGR order from the capture pipeline
+            except CaptureTimeout:
+                log.warning("no frame for 1 s, restarting capture")
+                cam.stop()
+                cam.start()
+                continue
+            finally:
+                signal.alarm(0)
             bgr = np.array(frame)
             frame.freebuffer()
             with lock:
@@ -227,6 +255,8 @@ def run_camera(args, model, pre_factory):
             out[:] = 0
             out[y0:y0 + CAM_H, x0:x0 + CAM_W, :] = view
             hdmi.writeframe(out)
+            if n in (150, 450, 900):
+                cv2.imwrite("det_cam_%d.jpg" % n, view)
             dt = time.perf_counter() - t0
             disp_fps = 0.9 * disp_fps + 0.1 / max(dt, 1e-6) if n else 1 / max(dt, 1e-6)
             if n % 30 == 0:
